@@ -1,0 +1,308 @@
+---
+title: "Description Caaban Project"
+author: ""
+date: 
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Reading the DCC files  
+(following GeomxSet_coercions.html vignette from "D:/oldComputer/trainingStuff/coursera/BIOINFO_Courses/scRNA-seq/fost_Seurat/NanoString")
+
+```{r eval=T,warning=FALSE,message=FALSE}
+# load packages
+library(GeomxTools)
+library(Seurat)
+library(SpatialExperiment)
+library(SpatialDecon)
+library(patchwork) # combine separate ggplots into the same graphic
+library(RColorBrewer)
+library(celldex)
+library(SingleR)
+library(dplyr)
+dr="//derelict/hpc-prj/wren/chaaban_scRNAspatial/allDCC/"
+```
+
+## Read 
+```{r eval=F,warning=FALSE,message=FALSE}
+############ read All DCC files at once ##########
+
+dr="//derelict/hpc-prj/wren/chaaban_scRNAspatial/allDCC/"
+DCCFiles <- dir(dr, pattern=".dcc$", full.names=TRUE);
+#PKCFiles <- unzip(zipfile = file.path(dr,"/Hs_R_NGS_WTA_v1.0.pkc_.zip"))
+PKCFiles="./Hs_R_NGS_WTA_v1.0.pkc"
+SampleAnnotationFile<-file.path(dr,"ROIKeyAnno_BothSet.xlsx") 
+
+objData12=suppressWarnings(readNanoStringGeoMxSet(dccFiles=DCCFiles,pkcFiles=PKCFiles[1],phenoDataFile=SampleAnnotationFile,phenoDataSheet="29June2021_CTA_20210630T1934_La",phenoDataDccColName="Sample_ID",protocolDataColNames=c("aoi","NECType","roi","area","segment","Patient","segType")))
+
+pData(objData12)$Set=c("Fr","Sc")[1*(sData(objData12)$Patient%in%c(5:7))+1]
+
+# access objData12 components 
+# objData12 # NanoStringGeoMxSet object ; assayData: 18815 features, 56 samples 
+# mat=exprs(objData12);dim(mat) # 18815 56
+# colData=sData(objData12); dim(colData); # 56 27
+# colnames(colData); # slide name; scan name; panel; Set; FileVersion; SoftwareVersion; Date; SampleID; Plate_ID; Well; SeqSetId; Raw; Trimmed; Stitched; Aligned; umiQ30; rtsQ30; DeduplicatedReads; roi; segment; aoi; area; NECType; Patient; segType; NTC_ID; NTC
+# table(colData$Patient,colData$segType)
+# table(colData$Set,colData$Patient)
+
+# QC filtering
+objData12<- shiftCountsOne(objData12, useDALogic=TRUE) # Shift all 0 counts by 1  (package GeomxTools)
+objData12<-setSegmentQCFlags(objData12, qcCutoffs = list(percentSaturation = 45)) # QCFlags data frame appended to protocolData ; 
+objData12<-setBioProbeQCFlags(objData12) # Add probe QC flags to object feature data
+lowSaturation <- which(protocolData(objData12)[["QCFlags"]]$LowSaturation) # low sequenced ROIs
+lowQCprobes <- which(featureData(objData12)[["QCFlags"]]$LowProbeRatio |featureData(objData12)[["QCFlags"]]$GlobalGrubbsOutlier) # probes considered outliers 
+#passedQC <- objData12[-lowQCprobes, -lowSaturation]
+passedQC <- objData12 # no features/ROIs with low quality
+assayDataElementNames(passedQC) # "exprs" "preLocalRemoval" "rawZero" # same as names(assayData(passedQC)) all 18815 56 matrices
+
+# need to aggregated to Target level data before coercing.  (Changes row form probe ID to gene name; aggregate multiple probes per gene)
+featureType(passedQC) # Probe
+table(table(fData(passedQC)[,"TargetName"])) # there are multiple rows (probes) for each gene ("TargetName" column in fData data frame)
+target_demoData <- aggregateCounts(passedQC) # use TargetName column of fData, aggregate on it
+featureType(target_demoData) # "Target" (row name of exprs(target_demoData) become gene names)
+
+# 3.	normalize, before coercing to Seurat, using a GeoMx specific model (recommended), rather than use Seurat normalization after)
+norm_target_demoData <- normalize(target_demoData, norm_method="quant", desiredQuantile = .75, toElt = "q_norm") # normalized data in assayData slot “q_norm”; 
+#norm_target_demoData <- normalize(target_demoData, norm_method="Housekeeping-Log2", toElt = "q_norm") # normalized data in assayData slot “q_norm”; 
+assayDataElementNames(norm_target_demoData) # "exprs" "q_norm"
+
+#	Seurat Coercion
+#demoSeurat <- as.Seurat(norm_target_demoData, normData = "q_norm") # input need to be aggregated on Target; normalized (can force raw input with forceRaw=TRUE); correct name of norm Data specified;
+objSeurat <- as.Seurat(norm_target_demoData, normData = "q_norm", ident = "segType")
+
+```
+
+Initially I got Differentially expressed genes using voom/limma as if I had bulkRna data. First version of umap was done directly using library(umap) on "vobjDream$E" matrix (see myCode.txt inside chaaban_scRNAspatial folder).
+
+## SCTransform normalization followed by UMAP and Clustering
+
+Below there is a diffrent umap picture made after renormalizing the seurat object with SCT and going trough standard pipeline (it merge better the two sets of DCC files, patients 1,2,3,4 respectively patients 5,6,7)
+
+```{r eval=F,warning=FALSE,message=FALSE}
+## SCTransform normalization followed by UMAP and Clustering
+CDPreAdj=(objSeurat$segType=="CDPre")*(1-2*(objSeurat$Set=="Fr"))
+CDPreAdj[CDPreAdj>0]=1/sum(CDPreAdj[CDPreAdj>0]);CDPreAdj[CDPreAdj<0]=1/sum(CDPreAdj[CDPreAdj<0])
+PanPreAdj=(objSeurat$segType=="PanPre")*(1-2*(objSeurat$Set=="Fr"))
+PanPreAdj[PanPreAdj>0]=1/sum(PanPreAdj[PanPreAdj>0]);PanPreAdj[PanPreAdj<0]=1/sum(PanPreAdj[PanPreAdj<0])
+#CDPreAdj=(objSeurat$segType=="CDPre")*(objSeurat$Set=="Fr")
+#PanPreAdj=(objSeurat$segType=="PanPre")*(objSeurat$Set=="Fr")
+objSeurat$CDPreAdj=CDPreAdj
+objSeurat$PanPreAdj=PanPreAdj
+objSeurat<-SCTransform(objSeurat,method="glmGamPoi",vars.to.regress=c("CDPreAdj","PanPreAdj","nFeature_GeoMx"),verbose=FALSE,assay="GeoMx")
+
+objSeurat <- RunPCA(objSeurat, verbose = FALSE,npcs=25)
+objSeurat <- RunUMAP(objSeurat, dims = 1:24, verbose = FALSE,n.components=2) # use 30 PCs instead of 10 for downstream
+objSeurat <- FindNeighbors(objSeurat, dims = 1:24, verbose = FALSE,k.param = 10) # parameter reduction = 'pca' (default) selects which dim reduction to use
+objSeurat <- FindClusters(objSeurat, verbose = FALSE)
+objSeurat[["umap"]]@cell.embeddings=objSeurat[["umap"]]@cell.embeddings[,2:1]; 
+objSeurat[["umap"]]@cell.embeddings[,1]=-objSeurat[["umap"]]@cell.embeddings[,1]; 
+colnames(objSeurat[["umap"]]@cell.embeddings)=colnames(objSeurat[["umap"]]@cell.embeddings)[2:1]
+
+objSeurat$seurat_clusters=factor(c(2,3,1)[as.numeric(objSeurat$seurat_clusters)])
+table(objSeurat$segType,objSeurat$seurat_clusters)
+# separae PanPre and CDPre in 2 groups each
+segTypeClst=objSeurat$segType;segTypeClst[segTypeClst=="PanPre"&objSeurat$seurat_clusters==2]="PanPre_1";segTypeClst[segTypeClst=="CDPre"&objSeurat$seurat_clusters==1]="CDPre_1";
+objSeurat$segTypeClst=segTypeClst
+
+save(objSeurat,file="objSeurat_UMAPs.rda")
+
+```
+
+## Describing objSeurat
+
+```{r eval=TRUE}
+load("objSeurat_UMAPs.rda")
+objSeurat # Seurat object, 18677 features 56 samples 1 assay (Active assay: GeoMx)
+names(objSeurat) # "GeoMx" "SCT" "SCT_nn" "SCT_snn" "pca" "umap" 
+slotNames(objSeurat) # assays; meta.data; active.assay; active.ident; graphs; neighbors; reductions; images; project.name; misc; version; commands; tools
+#Assays(objSeurat) #  "GeoMx" # not working
+names(objSeurat@reductions) # "pca"  "umap"
+# access
+names(objSeurat@assays) # "GeoMx" (before normalization) # "GeoMx" "SCT" after SCTnomalize
+objSeurat@assays[["GeoMx"]][1:2,1:5] # 18677 56 (normalized values, with .)
+slotNames(objSeurat@assays[["GeoMx"]]) #  counts (18677 56); data (18677 56); scale.data (0 0); key; assay.orig; var.features; meta.features; misc
+slotNames(objSeurat[["GeoMx"]]) # same as slotNames(objSeurat@assays[["GeoMx"]])
+slotNames(objSeurat@assays[["SCT"]]) # SCTModel.list; counts (18677 56); data (18677 56); scale.data (3000 56); key; assay.orig; var.features; meta.features; misc
+head(objSeurat, 3) # most important ROI metadata 56 24 
+colnames(head(objSeurat, 3)) # orig.ident; nCount_GeoMx; nFeature_GeoMx; slide.name; scan.name; panel; Set; NegGeoMean_Hs_R_NGS_WTA_v1.0; NegGeoSD_Hs_R_NGS_WTA_v1.0; q_norm_qFactors; SampleID; roi; segment; aoi; area; NECType; Patient; segType; CDPreAdj; PanPreAdj; nCount_SCT; nFeature_SCT; SCT_snn_res.0.8; seurat_clusters
+dim(objSeurat@meta.data) #  56 24 # the file above (like pData) – ROI metadata
+head(objSeurat@assays$GeoMx@meta.features) # gene metadata 18677 6; colnames: TargetName; Module; CodeClass; GeneID; SystematicName; Negative
+
+```
+
+## UMAPs
+
+```{r}
+#boxplot(objSeurat[["umap"]]@cell.embeddings[,"UMAP_1"]~objSeurat$Patient)
+#boxplot(objSeurat[["umap"]]@cell.embeddings[,"UMAP_2"]~objSeurat$Patient)
+load("objSeurat_UMAPs.rda")
+#objSeurat$seurat_clusters=factor(c(2,3,1)[as.numeric(objSeurat$seurat_clusters)])
+table(objSeurat$segType,objSeurat$seurat_clusters)
+## separae PanPre and CDPre in 2 groups each
+#segTypeClst=objSeurat$segType;segTypeClst[segTypeClst=="PanPre"&objSeurat$seurat_clusters==2]="PanPre_1";segTypeClst[segTypeClst=="CDPre"&objSeurat$seurat_clusters==1]="CDPre_1";
+#objSeurat$segTypeClst=segTypeClst
+table(objSeurat$segTypeClst)
+
+DimPlot(objSeurat,label=F,group.by ="Set",dims = c(1, 2),pt.size=2)
+DimPlot(objSeurat,label=F,group.by="Patient",dims=c(1,2),pt.size=2,shape.by="Set",cols = brewer.pal(length(unique(objSeurat$Patient)),"Accent"))
+
+DimPlot(objSeurat,label=F,group.by="segType",dims=c(1,2),pt.size=2,shape.by="Set")
+DimPlot(objSeurat,label=F,group.by ="seurat_clusters",dims = c(1, 2),pt.size=2,shape.by="Set")
+#table(objSeurat$segType,objSeurat$seurat_clusters)
+DimPlot(objSeurat,label=F,group.by="segType",dims=c(1,2),pt.size=2,shape.by="seurat_clusters")
+## separae PanPre and CDPre in 2 groups each
+table(objSeurat$segTypeClst)
+DimPlot(objSeurat,label=F,group.by="segTypeClst",dims=c(1,2),pt.size=2,shape.by="seurat_clusters")
+
+```
+
+## Convolution with SpatialDecon  
+Follow SpatialDecon_vignette.html from fost_Seurat/NanoString folder.  
+If we can add more than one matrix for convolution, the **Ileum_Wang** and **ImmuneTumor_safeTME** might be interesting—if not, the one you already selected  (**Gut_HCA**) looks good. (See HumanAdult_CellTypes.xlsx file, in chaaban_scRNAspatial folder, listing the options for matrices)
+
+```{r eval=FALSE}
+## NOT WORKING (but it did work last time, see how it was done)
+library(Seurat)
+library(SpatialDecon)
+# download profile matrix from List: CellProfileLibrary GitHub Page (https://github.com/Nanostring-Biostats/CellProfileLibrary/tree/NewProfileMatrices) (use Gut_HCA.RData for your project)
+# Elmentaite, R. et al. Cells of the human intestinal tract mapped across space and time. bioRxiv 2021.04.07.438755 (2021) doi:10.1101/2021.04.07.438755.
+profileMat<-download_profile_matrix(species = "Human",age_group = "Adult",matrixname = "Gut_HCA") 
+head(cellGroups) # list describing cell types; uploaded by download_profile_matrix function
+metadata # general info about mousespleen (also uploaded during download)
+heatmap(sweep(profileMat, 1, apply(profileMat, 1, max), "/"),labRow = NA, margins = c(10, 5), cexCol = 0.7)
+## profileMatCollapsed=collapseCellTypes(fit=profileMat,matching=cellGroups) # safeTME.matches – list name group, cell types (see above)
+
+profileMat_Gut=profileMat;
+cellGroups_Gut=cellGroups;
+
+profileMat<-download_profile_matrix(species="Human",age_group="Adult",matrixname="Ileum_Wang"); profileMat_IW=profileMat;
+cellGroups_IW=cellGroups;
+
+profileMat<-download_profile_matrix(species="Human",age_group="Adult",matrixname="ImmuneTumor_safeTME");profileMat_TME=profileMat;cellGroups_TME=cellGroups;
+
+norm=objSeurat@assays[["SCT"]]@data
+# get background matrix
+#bg=derive_GeoMx_background(norm = norm, probepool = rep(1,nrow(norm)),negnames="NegProbe-WTX") # using package function
+per.observation.mean.neg = norm["NegProbe-WTX", ]; 
+bg = sweep(norm * 0, 2, per.observation.mean.neg, "+") 
+
+#res1=spatialdecon(norm =as.matrix(norm), bg = bg, X = safeTME, cellmerges=safeTME.matches,raw=demoSeurat@assays[["GeoMx"]]@counts)
+res1=spatialdecon(norm =as.matrix(norm), bg = bg, X =profileMat_Gut, cellmerges=cellGroups_Gut)
+
+```
+
+## Try cellDex  
+Used in Susan project
+
+```{r eval=F,warning=FALSE,message=FALSE}
+# http://bioconductor.org/books/3.13/OSCA.basic/cell-type-annotation.html#assigning-cell-labels-from-reference-data
+# https://bioconductor.org/packages/3.13/data/experiment/vignettes/celldex/inst/doc/userguide.html # lists options for ref data
+
+cnts=GetAssayData(objSeurat,assay="SCT",slot="data")
+
+library(celldex)
+# ref <- BlueprintEncodeData() # Blueprint/ENCODE
+ref <- HumanPrimaryCellAtlasData() # Human primary cell atlas (HPCA)
+library(SingleR)
+pred<-SingleR(test=cnts,ref=ref,labels=ref$label.main)
+lbls=pred$labels
+#baboon.combined.sct$CellType=lbls
+predFine <- SingleR(test=cnts, ref=ref, labels=ref$label.fine)
+lblsFine=predFine$labels
+
+objSeurat$CellType=lbls
+save(objSeurat,pred,file="objSeurat_UMAPs.rda")
+```
+
+```{r warning=FALSE,message=FALSE}
+load("objSeurat_UMAPs.rda")
+
+plotScoreHeatmap(pred)
+
+lbls=objSeurat$CellType
+table(objSeurat$CellType,objSeurat$seurat_clusters)
+table(objSeurat$CellType,objSeurat$segType)
+table(objSeurat$CellType,objSeurat$segTypeClst)
+tt=sort(table(objSeurat$CellType),decreasing=T);clk=names(tt[tt>2]);jjj=which(lbls%in%clk);clr=rep("other",length(lbls));clr[jjj]=lbls[jjj];objSeurat$CellType6=clr
+DimPlot(objSeurat,label=F,group.by ="CellType6",dims = c(1, 2),pt.size=2,shape.by="segType",cols = brewer.pal(length(clk)+1,"Accent"),order = rev(c(clk,"other")))
+DimPlot(objSeurat,label=F,group.by ="CellType6",dims = c(1, 2),pt.size=2,shape.by="segTypeClst",cols = brewer.pal(length(clk)+1,"Accent"),order = rev(c(clk,"other")))
+```
+
+## Caracterize Clusters
+
+### Top genes segTypeClst
+```{r message=FALSE}
+# load("objSeurat_UMAPs.rda")
+Idents(objSeurat)="segTypeClst"
+markersAll=FindAllMarkers(objSeurat,assay="SCT",slot="data",only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) 
+#markersAll$t=qnorm(markersAll$p_val)*(1-2*(markersAll$avg_log2FC>0))
+head(markersAll,n=3)
+top10s=markersAll%>%group_by(cluster)%>%slice_min(n=6,order_by=p_val)
+#print(top10s,n=3)
+cbind(tapply(top10s$gene,top10s$cluster,function(x) paste0(x,collapse = ", ")))
+DoHeatmap(object=objSeurat,features=top10s$gene,assay="SCT",slot="data",size=2.5,draw.lines=T)+NoLegend() 
+
+```
+
+### Top genes segType
+```{r message=FALSE}
+# load("objSeurat_UMAPs.rda")
+Idents(objSeurat)="segType"
+markersAll=FindAllMarkers(objSeurat,assay="SCT",slot="data",only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) 
+#markersAll$t=qnorm(markersAll$p_val)*(1-2*(markersAll$avg_log2FC>0))
+#head(markersAll)
+top10s=markersAll%>%group_by(cluster)%>%slice_min(n=10,order_by=p_val)
+#print(top10s,n=3)
+cbind(tapply(top10s$gene,top10s$cluster,function(x) paste0(x,collapse = ", ")))
+DoHeatmap(object=objSeurat,features=top10s$gene,assay="SCT",slot="data",size=2.5,draw.lines=T)+NoLegend() 
+
+```
+
+### PanPre_1 markers
+```{r message=FALSE}
+# load("objSeurat_UMAPs.rda")
+Idents(objSeurat)="segTypeClst";
+jjj=which(objSeurat$segTypeClst%in%c("PanPre_1","PanPre"))
+#markers=FindMarkers(objSeurat[,jjj],assay="SCT",slot="data",only.pos = TRUE, min.pct=0.25, logfc.threshold=0.25,ident.1="PanPre_1",ident.2="PanPre" ) 
+markers=FindMarkers(objSeurat[,jjj],assay="SCT",slot="data",only.pos = FALSE, min.pct=0.25, logfc.threshold=0.25,ident.1="PanPre_1",ident.2="PanPre" ) 
+#markersAll$t=qnorm(markersAll$p_val)*(1-2*(markersAll$avg_log2FC>0))
+#head(markersAll)
+top10s=markers%>%slice_min(n=25,order_by=p_val)
+#print(top10s,n=3)
+paste0(row.names(top10s),collapse = ", ")
+DoHeatmap(object=objSeurat[,jjj],features=row.names(top10s),assay="SCT",slot="data",size=2.5,draw.lines=T,label=F) 
+
+```
+
+### CDPre_1 markers
+```{r}
+# load("objSeurat_UMAPs.rda")
+Idents(objSeurat)="segTypeClst";
+jjj=which(objSeurat$segTypeClst%in%c("CDPre_1","CDPre"))
+#markers=FindMarkers(objSeurat[,jjj],assay="SCT",slot="data",only.pos = TRUE, min.pct=0.25, logfc.threshold=0.25,ident.1="CDPre_1",ident.2="CDPre" ) 
+markers=FindMarkers(objSeurat[,jjj],assay="SCT",slot="data",only.pos =FALSE, min.pct=0.25, logfc.threshold=0.25,ident.1="CDPre_1",ident.2="CDPre" ) 
+#markersAll$t=qnorm(markersAll$p_val)*(1-2*(markersAll$avg_log2FC>0))
+#head(markersAll)
+top10s=markers%>%slice_min(n=25,order_by=p_val)
+#print(top10s,n=3)
+paste0(row.names(top10s),collapse = ", ")
+DoHeatmap(object=objSeurat[,jjj],features=row.names(top10s),assay="SCT",slot="data",size=2.5,draw.lines=T,label=F) 
+
+```
+
+## Method Section  
+
+**ScRNA-seq data preprocessing, quantification and analysis**  
+GeoMX digital spatial profiling paraffin embedded tissues from 5 preterm NEC and 2 cardiac NEC patients were processed and analyzed at OMRF NanoString GeoMx service Imaging core using a combination of fluorescently labeled antibodies and the GeoMx Whole Transcriptome Atlas (WTA), targeting over 18,000 human protein coding genes. Roughly equal number of immune-rich (CD45) and epithelial-rich (Pan-CK) regions of interests (ROIs) were selected per patient, summing up to 7 ROIs per condition in cardiac samples and about 21 ROIs per condition in preterm samples. After selecting regions of interest (ROIs) on the GeoMx DSP, the DSP barcodes were UV cleaved and collected. During library preparation, the DSP barcodes were tagged with their ROI location then sequenced on an Illumina sequencer. Sequenced oligonucleotides were processed then imported back into the GeoMx DSP platform for integration with the slide images and ROI selections for spatially-resolved RNA expression. Using the Nanostring GeoMx Digital Spatial Profiler (DSP) sequencing technology whole human transcriptome abundance for each region of interest (ROI) was quantified. 
+The DSS files with raw count data were imported into R, QC filtered and normalized using GeomxTools package from Bioconductor. RNA probe counts used in the analyses were selected following a sequencing QC according to Nanostring protocols, where counts from each area of interest are analyzed and under-sequenced samples are dropped (field of view percentage of 75% and Binding density from 0.1 to 2.25), and a probe QC, where mRNAs are targeted by multiple probes and outlier probes are dropped from downstream data analysis (positive spike-in normalization factor between 0.3 and 3). Then RNA counts were normalized using a signal-based normalization, in which individual counts are normalized against the 75th percentile of signal from their own area of interest.
+Normalized data were then coerced into a Seurat object and standard subsequent analyses was performed using the integrated pipeline of Seurat R package. After selection of highly variable features the integrated data over all 7 samples were subject to PCA and nonlinear dimensionality reduction with UMAP/sSNE. 3 clusters of ROIs were generated using the K-nearest neighbor (KNN) approach with SLM modularity optimization implemented by FindClusters function (resolution = 0.015) of the Seurat package. UMAP 2d representation was  used to visualize the result of clustering. 
+Differential expression analysis between ROI conditions and cancer types, and identification of conserved cell type markers within each cluster, was performed with Seurat FindMarkers function and expression profiles of the selected features were visualized with DoHeatmap function. Adjusted p<0.05 and |log2FC|>0.25 was used to defined significant DEGs.  
+Functional analysis, identifying sets of genes sharing the same functionality (GO, KEGG pathways), overrepresented among the lists of differentially expressed features,  was performed with specialized packages from Bioconductor. Ingenuity Pathway Analysis (IPA, QIAGEN, Redwood City CA) was used to identify and explore significantly altered pathways, functional sets and gene networks interactively.  
+Mixed cell deconvolution on each ROI was perform with celldex package functionality. Using the gene expression data, abundance of each cell type within each observation was estimated and the dominant category was assigned as ROI cell type. Relative percentage distribution and enrichment of cell types across clusters, disease type and Pan-CK/CD45 condition was studied and visualized using Correspondence Analysis tools.
+
+
+
+
